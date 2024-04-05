@@ -1,0 +1,746 @@
+import tkinter as tk
+from datetime import datetime, timedelta
+import json
+from tkinter import messagebox
+import os
+from pandas import read_excel
+import re
+import sqlalchemy
+from sqlalchemy import create_engine
+import tkinter as tk
+from firebase_admin import firestore
+import firebase_admin
+from firebase_admin import credentials
+from google.cloud.firestore_v1.base_query import FieldFilter
+from keys import service_account_info
+
+cred = credentials.Certificate(service_account_info)
+firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+current_data = []
+
+
+def on_database_select(database_name):
+    set_database(database_name)
+    if 'db_select_win' in globals():
+        db_select_win.destroy() # Закрыть окно выбора базы данных
+
+
+def set_database(database_name):
+    global selected_database
+    selected_database = database_name
+
+
+def remove_expired_items():
+    today = datetime.now()
+
+    def is_expired(item_date):
+        item_date = datetime.strptime(item_date, "%d.%m.%Y")
+        expiration_date = today - timedelta(days=2)
+        return item_date <= expiration_date
+
+    try:
+        collection_ref = db.collection(selected_database)
+        # Получаем все документы из коллекции
+        docs = collection_ref.get()
+
+        for doc in docs:
+            data = doc.to_dict()
+            if 'expiration_date' in data:
+                if is_expired(data['expiration_date']):
+                    # Удаляем документ, если его срок давности истек
+                    doc.reference.delete()
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+
+def new_overdue(overdue):
+    try:
+        doc_ref = db.collection(selected_database).document(overdue["barcode"] + "-" + overdue["expiration_date"])
+
+        # Устанавливаем данные для этого документа
+        doc_ref.set(overdue)
+        print("Данные успешно записаны в Firebase!")
+    except Exception as e:
+        print(f"Ошибка при записи данных в Firebase: {e}")
+
+
+def enter_data():
+    def close_new_window():
+        new_win.destroy()
+        win.deiconify()
+
+    def load_info():
+        barcode = name_cod.get()
+        item_name = name.get()
+        item_quantity = quantity.get()
+        expiration_date = date.get()
+        comment_text = comment.get("1.0", tk.END).strip()
+        id_number = barcode + "-" + expiration_date
+
+        if not barcode or not expiration_date:
+            messagebox.showinfo("Пустые поля", "Вы забыли заполнить одно из ключевых полей.")
+            return
+
+        if barcode and expiration_date:
+            # Если хотя бы одно поле не пустое, создаем словарь и записываем в файл
+            overdue_list = {
+                'barcode': barcode,
+                'item_name': item_name,
+                'item_quantity': item_quantity,
+                'expiration_date': expiration_date,
+                'comment_text': comment_text,
+                'id_number': ('barcode'+'expiration_date')
+            }
+
+            new_overdue(overdue_list)
+
+        name_cod.delete(0, tk.END)
+        name.delete(0, tk.END)
+        quantity.delete(0, tk.END)
+        date.delete(0, tk.END)
+        comment.delete("1.0", tk.END)
+        name_cod.focus_set()
+
+    def database_search():
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        file_path = os.path.join(base_path, 'data.xlsx')
+        find_file = name_cod.get()
+        df = read_excel(file_path)
+
+        try:
+            array = df[(df['Artikelnummer'] == find_file)]['Beschreibung'].values
+            if len(array) == 0:
+                name.delete(0, tk.END)  # Очистить поле перед вставкой нового значения
+                name.insert(tk.END, 'Номер не найден')
+            else:
+                result = str(array[0]).strip()
+                name.delete(0, tk.END)  # Очистить поле перед вставкой нового значения
+                name.insert(tk.END, result)  # Вставить результат в поле name
+        except IndexError:
+            name.insert(tk.END, 'Номер не найден')
+
+    def add_dots(event):
+        current_text = date.get()
+
+        if event.keysym.isdigit() or event.keysym == "BackSpace":
+            if event.keysym.isdigit() and len(current_text) in [2, 5]:
+                current_text += '.'
+
+            date.delete(0, tk.END)
+            date.insert(tk.END, current_text)
+
+            # Проверка на корректный формат даты только при вводе полной даты
+            if len(current_text) == 10:
+                date_pattern = re.compile(r'^(0[1-9]|[12]\d|3[01])\.(0[1-9]|1[0-2])\.\d{4}$')
+
+                if not date_pattern.match(current_text):
+                    messagebox.showwarning("Некорректный формат даты", "Пожалуйста, введите корректную дату.")
+                    date.delete(0, tk.END)
+
+    def on_enter_key(event):
+        database_search()
+        focus_next_entry(event)
+
+    def focus_next_entry(event):
+        event.widget.tk_focusNext().focus()
+
+    win.withdraw()
+    win_geometry = win.geometry()
+    new_win = tk.Toplevel()
+    new_win.title('Введите информацию о просрочке')
+    new_win.geometry(win_geometry)
+    new_win.resizable(False, False)
+    new_win.config(bg='#ffe0af')
+    photo = tk.PhotoImage(file='ProSrokPic.png')
+    new_win.iconphoto(False, photo)
+
+    for i in range(5):
+        tk.Label(new_win, text='', bg='#ffe0af').grid(row=i, column=0)
+    tk.Label(new_win, text='код товара:', bg='#ffe0af', font=('Myriad Pro', 14, 'bold')).grid(row=5, column=0,
+                                                                                              sticky='e')
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=6, column=0, sticky='e', padx=(40, 0))
+    tk.Label(new_win, text='   наименование товара:', bg='#ffe0af', font=('Myriad Pro', 14, 'bold')).grid(row=7,
+                                                                                                          column=0,
+                                                                                                          sticky='e',
+                                                                                                          padx=(40, 0))
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=8, column=0, sticky='e', padx=(40, 0))
+    tk.Label(new_win, text='количество:', bg='#ffe0af', font=('Myriad Pro', 14, 'bold')).grid(row=9, column=0,
+                                                                                              sticky='e', padx=(40, 0))
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=10, column=0, sticky='e', padx=(40, 0))
+    tk.Label(new_win, text='   дата окончания срока:', bg='#ffe0af', font=('Myriad Pro', 14, 'bold')).grid(row=11,
+                                                                                                           column=0,
+                                                                                                           sticky='e',
+                                                                                                           padx=(40, 0))
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=12, column=0, sticky='e', padx=(40, 0))
+    tk.Label(new_win, text='комментарий:', bg='#ffe0af', font=('Myriad Pro', 14, 'bold')).grid(row=13, column=0,
+                                                                                               sticky='e', padx=(40, 0))
+
+    name_cod = tk.Entry(new_win, width=47, font=('Arial', 14))  # Установите нужный размер шрифта и выберите его высоту
+    name_cod.grid(row=5, column=1, padx=(40, 0))
+    name_cod.bind('<Return>', on_enter_key)
+    name_cod.focus_set()
+
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=6, column=1)
+    name = tk.Entry(new_win, width=47, font=('Arial', 14))
+    name.grid(row=7, column=1, padx=(40, 0))
+    name.bind('<Return>', focus_next_entry)
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=8, column=1)
+    quantity = tk.Entry(new_win, width=47, font=('Arial', 14))
+    quantity.grid(row=9, column=1, padx=(40, 0))
+    quantity.bind('<Return>', focus_next_entry)
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=10, column=1)
+    date = tk.Entry(new_win, width=47, font=('Arial', 14))
+    date.grid(row=11, column=1, padx=(40, 0))
+    date.bind('<KeyRelease>', add_dots)
+    date.bind('<Return>', focus_next_entry)
+    tk.Label(new_win, text='', bg='#ffe0af').grid(row=12, column=1)
+    comment = tk.Text(new_win, height=6, wrap="word", width=47, font=('Arial', 14))
+    comment.grid(row=13, column=1, columnspan=2, padx=(40, 0))
+
+    new_win.grid_columnconfigure(0, minsize=300)
+    new_win.grid_columnconfigure(0, minsize=200)
+
+    close_btn = tk.Button(new_win, text='Закрыть', bg='#fdd28e', font=('Myriad Pro', 20, 'bold'),
+                          command=close_new_window, width=20, height=2)
+    close_btn.grid(row=14, column=1)
+    close_btn.place(relx=0.75, rely=0.8, anchor=tk.CENTER)
+    load_btn = tk.Button(new_win, text='Загрузить', bg='#fdd28e', font=('Myriad Pro', 20, 'bold'),
+                         command=load_info, width=20, height=2)
+    load_btn.grid(row=15, column=2)
+    load_btn.place(relx=0.25, rely=0.8, anchor=tk.CENTER)
+
+    new_win.focus_force()  # Фокусируем окно
+    name_cod.focus_set()
+
+
+def edit(info_window):
+    global new_win
+    remove_expired_items()
+    win.withdraw()
+    new_win = tk.Toplevel()
+    new_win.title('Удаление и редактирование ')
+    new_win.geometry('800x600')
+    new_win.resizable(False, False)
+    new_win.config(bg='#ffe0af')
+    photo = tk.PhotoImage(file='ProSrokPic.png')
+    new_win.iconphoto(False, photo)
+
+    def get_data_from_database():
+        try:
+            # Получаем коллекцию  из базы данных Firestore
+            collection_ref = db.collection(selected_database)
+            # Получаем все документы из коллекции
+            docs = collection_ref.get()
+            data_from_db = [doc.to_dict() for doc in docs]
+            return data_from_db
+        except Exception as e:
+            print(f"An error occurred while fetching data from the database: {e}")
+            return []
+
+    def close_new_window():
+        info_window.destroy()
+        new_win.destroy()
+        show_info_window()
+
+    def edit_entry():
+        selected_raw = listbox.curselection()
+
+        if selected_raw:
+            selected_raw_array = listbox.get(selected_raw[0]).split()
+            id_to_edit = selected_raw_array[0]+selected_raw_array[1]+selected_raw_array[2]
+            try:
+                # Получаем информацию о товаре по его ID из базы данных
+                doc_ref = db.collection(selected_database).document(id_to_edit)
+                selected_item = doc_ref.get().to_dict()
+
+                if selected_item:
+                    edit_win = tk.Toplevel()
+                    edit_win.title('Редактирование записи')
+                    edit_win.geometry('600x450')
+                    edit_win.resizable(False, False)
+                    edit_win.config(bg='#ffe0af')
+                    photo = tk.PhotoImage(file='ProSrokPic.png')
+                    edit_win.iconphoto(False, photo)
+                    label1 = tk.Label(edit_win, text='Код товара:')
+                    label1.config(bg='#ffe0af', font=('Myriad Pro', 14, 'bold'))
+                    label1.pack()
+                    barcode_entry = tk.Entry(edit_win, width=30, font=('Arial', 14))
+                    barcode_entry.insert(tk.END, selected_item['barcode'])
+                    barcode_entry.pack()
+                    label2 = tk.Label(edit_win, text='Название товара:')
+                    label2.config(bg='#ffe0af', font=('Myriad Pro', 14, 'bold'))
+                    label2.pack()
+                    name_entry = tk.Entry(edit_win, width=30, font=('Arial', 14))
+                    name_entry.insert(tk.END, selected_item['item_name'])
+                    name_entry.pack()
+                    label3 = tk.Label(edit_win, text='Количество:')
+                    label3.config(bg='#ffe0af', font=('Myriad Pro', 14, 'bold'))
+                    label3.pack()
+                    quantity_entry = tk.Entry(edit_win, width=30, font=('Arial', 14))
+                    quantity_entry.insert(tk.END, selected_item['item_quantity'])
+                    quantity_entry.pack()
+                    label4 = tk.Label(edit_win, text='Дата окончания срока:')
+                    label4.config(bg='#ffe0af', font=('Myriad Pro', 14, 'bold'))
+                    label4.pack()
+                    date_entry = tk.Entry(edit_win, width=30, font=('Arial', 14))
+                    date_entry.insert(tk.END, selected_item['expiration_date'])
+                    date_entry.pack()
+                    label5 = tk.Label(edit_win, text='Комментарий:')
+                    label5.config(bg='#ffe0af', font=('Myriad Pro', 14, 'bold'))
+                    label5.pack()
+                    comment_entry = tk.Text(edit_win, height=4, width=30, font=('Arial', 14))
+                    comment_entry.insert(tk.END, selected_item['comment_text'])
+                    comment_entry.pack()
+
+                    def save_changes():
+                        try:
+                            # Обновляем данные в документе
+                            doc_ref.update({
+                                'barcode': barcode_entry.get(),
+                                'item_name': name_entry.get(),
+                                'item_quantity': quantity_entry.get(),
+                                'expiration_date': date_entry.get(),
+                                'comment_text': comment_entry.get("1.0", tk.END)  # Добавлены индексы
+                            })
+                            refresh_listbox()
+                            edit_win.destroy()
+                        except Exception as e:
+                            print(f"An error occurred while updating the record: {e}")
+                    save_button = tk.Button(edit_win, text='Сохранить изменения', bg='#fdd28e',
+                                            font=('Myriad Pro', 18, 'bold'), command=save_changes)
+                    save_button.pack()
+                else:
+                    messagebox.showwarning("Ошибка", "Товар с указанным ID не найден.")
+
+            except ValueError:
+                messagebox.showwarning("Ошибка", "Выберите элемент для редактирования.")
+        else:
+            messagebox.showwarning("Ошибка", "Выберите элемент для редактирования.")
+
+    def delete_entry():
+        selected_raw = listbox.curselection()
+
+        if selected_raw:
+            selected_raw_array = listbox.get(selected_raw[0]).split()
+            id_to_delete = selected_raw_array[0]+selected_raw_array[1]+selected_raw_array[2]
+
+            try:
+                # Удаляем документ из коллекции по его ID
+                db.collection(selected_database).document(id_to_delete).delete()
+                refresh_listbox()
+            except Exception as e:
+                print(f"An error occurred while deleting the record: {e}")
+        else:
+            messagebox.showwarning("Ошибка", "Выберите элемент для удаления.")
+
+    def refresh_listbox():
+        listbox.delete(0, tk.END)
+        data_from_db = get_data_from_database()
+        # Сортируем данные по дате окончания срока
+        sorted_data = sorted(data_from_db, key=lambda x: datetime.strptime(x['expiration_date'], '%d.%m.%Y'))
+        for element in sorted_data:
+            formatted_date = element['expiration_date']
+            listbox.insert(tk.END, f"{element['barcode']} - {formatted_date} - {element['item_name']}")
+
+    listbox = tk.Listbox(new_win, width=70, height=25, selectmode='SINGLE')
+    listbox.config(font=('Myriad Pro', 10, 'bold'))
+    listbox.pack(ipady=10)
+
+    refresh_listbox()
+
+    edit_btn = tk.Button(new_win, text='Редактировать', bg='#fdd28e', font=('Myriad Pro', 12, 'bold'),
+                         command=edit_entry)
+    edit_btn.pack()
+
+    delete_btn = tk.Button(new_win, text='Удалить', bg='#fdd28e', font=('Myriad Pro', 12, 'bold'), command=delete_entry)
+    delete_btn.pack()
+
+    close_btn = tk.Button(new_win, text='Закрыть', bg='#fdd28e', font=('Myriad Pro', 12, 'bold'),
+                          command=close_new_window)
+    close_btn.pack()
+
+
+def show_info_window():
+    remove_expired_items()
+    win.withdraw()
+    win_geometry = win.geometry()
+    new_win = tk.Toplevel()
+    new_win.title('Информация о подходящих сроках')
+    new_win.geometry(win_geometry)
+    new_win.resizable(False, False)
+    new_win.config(bg='#ffe0af')
+    photo = tk.PhotoImage(file='ProSrokPic.png')
+    new_win.iconphoto(False, photo)
+
+    def close_new_window():
+        new_win.destroy()
+        win.deiconify()
+
+    def get_expired_info():
+        docs = db.collection(selected_database).get()
+        info_list = [doc.to_dict() for doc in docs]
+        sorted_info = sorted(info_list, key=lambda x: datetime.strptime(x['expiration_date'], '%d.%m.%Y'))
+
+        start_date = datetime.now() - timedelta(days=3)
+        end_date = datetime.now() - timedelta(days=1)
+
+        # Выбираем только информацию о товарах, срок годности которых находится в ближайшие 3 дня
+        imminent_info = [data for data in sorted_info if
+                         datetime.strptime(data['expiration_date'], '%d.%m.%Y') <= end_date]
+
+        # Форматируем информацию
+        info = ""
+        for data in imminent_info:
+            info += f"Код товара: {data['barcode']}\n"
+            info += f"Название: {data['item_name']}\n"
+            info += f"Количество: {data['item_quantity']}\n"
+            info += f"Дата окончания срока: {data['expiration_date']}\n"
+            info += f"Комментарий: {data['comment_text']}\n"
+            info += '\n'
+            info += "-" * 40 + "\n\n"  # Add separator between entries and a blank line
+
+        return info
+
+    def get_imminent_info():
+        # Получаем все данные и сортируем их по срокам годности
+        docs = db.collection(selected_database).get()
+        info_list = [doc.to_dict() for doc in docs]
+        sorted_info = sorted(info_list, key=lambda x: datetime.strptime(x['expiration_date'], '%d.%m.%Y'))
+
+        # Определяем текущую дату и дату, через 3 дня
+        start_date = datetime.now()
+        end_date = start_date + timedelta(days=3)
+
+        # Выбираем только информацию о товарах, срок годности которых находится в ближайшие 3 дня
+        imminent_info = [data for data in sorted_info if
+                         datetime.strptime(data['expiration_date'], '%d.%m.%Y') <= end_date]
+
+        # Форматируем информацию
+        info = ""
+        for data in imminent_info:
+            info += f"Код товара: {data['barcode']}\n"
+            info += f"Название: {data['item_name']}\n"
+            info += f"Количество: {data['item_quantity']}\n"
+            info += f"Дата окончания срока: {data['expiration_date']}\n"
+            info += f"Комментарий: {data['comment_text']}\n"
+            info += '\n'
+            info += "-" * 40 + "\n\n"  # Add separator between entries and a blank line
+
+        return info
+
+    def get_near_future_info():
+        docs = db.collection(selected_database).get()
+        info_list = [doc.to_dict() for doc in docs]
+        sorted_info = sorted(info_list, key=lambda x: datetime.strptime(x['expiration_date'], '%d.%m.%Y'))
+
+        start_date = datetime.now() + timedelta(days=3)
+        end_date = start_date + timedelta(days=4)
+
+        imminent_info = [data for data in sorted_info if
+                            start_date <= datetime.strptime(data['expiration_date'], '%d.%m.%Y') <= end_date]
+
+        # Форматируем информацию
+        info = ""
+        for data in imminent_info:
+            info += f"Код товара: {data['barcode']}\n"
+            info += f"Название: {data['item_name']}\n"
+            info += f"Количество: {data['item_quantity']}\n"
+            info += f"Дата окончания срока: {data['expiration_date']}\n"
+            info += f"Комментарий: {data['comment_text']}\n"
+            info += '\n'
+            info += "-" * 40 + "\n\n"  # Add separator between entries and a blank line
+
+        return info
+
+    def generate_info(docs):
+        info = ""
+        for doc in docs:
+            data = doc.to_dict()
+            info += f"Код товара: {data['barcode']}\n"
+            info += f"Название: {data['item_name']}\n"
+            info += f"Количество: {data['item_quantity']}\n"
+            info += f"Дата окончания срока: {data['expiration_date']}\n"
+            info += f"Комментарий: {data['comment_text']}\n"
+            info += '\n'
+            info += "-" * 40 + "\n\n"
+        return info
+
+    close_btn = tk.Button(new_win, text='Закрыть', bg='#fdd28e', font=('Myriad Pro', 15, 'bold'),
+                          command=close_new_window, width=15, height=2)
+    close_btn.pack()
+    close_btn.place(relx=0.5, rely=0.9, anchor=tk.CENTER)
+
+    general_list = tk.Button(new_win, text='Общий список', bg='#fdd28e', font=('Myriad Pro', 10, 'bold'),
+                             command=show_total, width=13, height=1)
+    general_list.pack()
+    general_list.place(relx=0.8, rely=0.9, anchor=tk.CENTER)
+
+    urgent_label_1 = tk.Label(new_win, text="Срочно снимите товар!\nТовар просрочен!", fg='red',
+                              font=('Myriad Pro', 12, 'bold'), bg='#ffe0af')
+    urgent_label_1.place(relx=0.19, rely=0.05, anchor=tk.CENTER)
+    urgent_label_2 = tk.Label(new_win, text="Поставьте скидку\nсрок 3 дня!", fg='orange',
+                              font=('Myriad Pro', 12, 'bold'), bg='#ffe0af')
+    urgent_label_2.place(relx=0.49, rely=0.05, anchor=tk.CENTER)
+    urgent_label_3 = tk.Label(new_win, text="Обратите внимание\nСрок менее недели", fg='green',
+                              font=('Myriad Pro', 12, 'bold'), bg='#ffe0af')
+    urgent_label_3.place(relx=0.79, rely=0.05, anchor=tk.CENTER)
+
+    info_text_1 = tk.Text(new_win, wrap=tk.WORD, width=25, height=25, exportselection=True)
+    info_text_2 = tk.Text(new_win, wrap=tk.WORD, width=25, height=25, exportselection=True)
+    info_text_3 = tk.Text(new_win, wrap=tk.WORD, width=25, height=25, exportselection=True)
+
+    info_text_1.place(relx=0.2, rely=0.45, anchor=tk.CENTER)
+    info_text_2.place(relx=0.5, rely=0.45, anchor=tk.CENTER)
+    info_text_3.place(relx=0.8, rely=0.45, anchor=tk.CENTER)
+
+    info_text_1.config(font=('Myriad Pro', 12, 'bold'), state=tk.DISABLED)
+    overdue_info = get_expired_info()
+    info_text_1.config(state=tk.NORMAL)
+    info_text_1.insert(tk.END, overdue_info)
+    info_text_1.config(fg='red')
+    info_text_1.config(state=tk.DISABLED)
+
+    info_text_2.config(font=('Myriad Pro', 12, 'bold'), state=tk.DISABLED)
+    imminent_info = get_imminent_info()
+    info_text_2.config(state=tk.NORMAL)
+    info_text_2.insert(tk.END, imminent_info)
+    info_text_2.config(fg='orange')
+    info_text_2.config(state=tk.DISABLED)
+
+    info_text_3.config(font=('Myriad Pro', 12, 'bold'))
+    near_future_info = get_near_future_info()
+    info_text_3.config(state=tk.NORMAL)
+    info_text_3.insert(tk.END, near_future_info)
+    info_text_3.config(fg='green')
+    info_text_3.config(state=tk.DISABLED)
+
+    edit_btn = tk.Button(new_win, text='редактировать', bg='#fdd28e', font=('Myriad Pro', 15, 'bold'),
+                         command=lambda: edit(new_win), width=15, height=2)
+
+    edit_btn.pack()
+    edit_btn.place(relx=0.2, rely=0.9, anchor=tk.CENTER)
+
+
+def show_total():
+    win.withdraw()
+    win_geometry = win.geometry()
+    new_win = tk.Toplevel()
+    new_win.title('Информация о подходящих сроках')
+    new_win.geometry(win_geometry)
+    new_win.resizable(False, False)
+    new_win.config(bg='#ffe0af')
+
+    def get_all_info():
+        docs = db.collection(selected_database).get()
+
+        info_list = []  # Create a list to store extracted data
+        for doc in docs:
+            data = doc.to_dict()
+            info_list.append(data)
+
+        sorted_info = sorted(info_list, key=lambda x: datetime.strptime(x['expiration_date'], '%d.%m.%Y'))
+
+        info = ""  # Create a string to store formatted information
+        for data in sorted_info:
+            info += f"Код товара: {data['barcode']}\n"
+            info += f"Название: {data['item_name']}\n"
+            info += f"Количество: {data['item_quantity']}\n"
+            info += f"Дата окончания срока: {data['expiration_date']}\n"
+            info += f"Комментарий: {data['comment_text']}\n"
+            info += '\n'
+            info += "-" * 52 + "\n\n"  # Add separator between entries and a blank line
+
+        return info
+
+    info_text = tk.Text(new_win, wrap=tk.WORD, width=30, height=35)
+    info_text.pack()
+
+    info_text.config(font=('Myriad Pro', 10, 'bold'))
+    all_info = get_all_info()
+    if all_info:
+        info_text.insert(tk.END, all_info)
+    else:
+        info_text.insert(tk.END, "Нет данных.")
+
+    info_text.config(state=tk.DISABLED)
+
+    scrollbar = tk.Scrollbar(new_win, orient=tk.VERTICAL, bg='#fdd28e', command=info_text.yview)
+    scrollbar.bg = '#fdd28e'
+    scrollbar.place(relx=0.7, rely=0.40, anchor=tk.CENTER, relheight=0.65)
+
+    info_text['yscrollcommand'] = scrollbar.set
+
+    def close_new_window():
+        new_win.destroy()
+
+    close_btn = tk.Button(new_win, text='Закрыть', bg='#fdd28e', font=('Myriad Pro', 15, 'bold'),
+                          command=close_new_window, width=15, height=2)
+    close_btn.pack()
+    close_btn.place(relx=0.5, rely=0.9, anchor=tk.CENTER)
+
+    photo = tk.PhotoImage(file='ProSrokPic.png')
+    new_win.iconphoto(False, photo)
+    new_win.mainloop()
+
+
+def product_search():
+    win.withdraw()
+    win_geometry = win.geometry()
+    new_win = tk.Toplevel()
+    new_win.title('Поиск Товара')
+    new_win.geometry(win_geometry)
+    new_win.resizable(False, False)
+    new_win.config(bg='#ffe0af')
+
+    def on_enter_key(event):
+        search_product()
+
+    tk.Label(new_win, text='код товара:', font=('Myriad Pro', 20, 'bold'), bg='#ffe0af').place(relx=0.15, rely=0.2,
+                                                                                               anchor=tk.CENTER)
+    name_cod = tk.Text(new_win, wrap=tk.WORD, width=30, height=1)
+    name_cod.place(relx=0.5, rely=0.2, anchor=tk.CENTER)
+    name_cod.config(font=('Myriad Pro', 20, 'bold'))
+    name_cod.bind('<Return>', on_enter_key)
+
+    info_text = tk.Text(new_win, wrap=tk.WORD, width=40, height=13, state=tk.DISABLED)
+    info_text.place(relx=0.5, rely=0.60, anchor=tk.CENTER)
+    info_text.config(font=('Myriad Pro', 15, 'bold'))
+    info_text.config(state=tk.DISABLED)
+
+    def search_product(event=None):
+        entered_code = name_cod.get("1.0", "end-1c").strip()
+
+        if entered_code:
+            try:
+                # Получаем коллекцию "tivat" из базы данных Firestore
+                collection_ref = db.collection(selected_database)
+                # Запрос по коду товара
+                query = collection_ref.where(field_path='barcode', op_string='==', value=entered_code).get()
+
+                info_text.config(state=tk.NORMAL)
+                info_text.delete("1.0", tk.END)
+
+                for doc in query:
+                    data = doc.to_dict()
+                    info_text.insert(tk.END, f"Название: {data['item_name']}\n"
+                                             f"Количество: {data['item_quantity']}\n"
+                                             f"Дата окончания срока: {data['expiration_date']}\n"
+                                             f"Комментарий: {data['comment_text']}\n"
+                                             f"------------------------------------------\n\n")
+
+                if not query:
+                    info_text.insert(tk.END, "Товары не найдены.")
+
+            except Exception as e:
+                print(f"An error occurred: {e}")
+
+            finally:
+                info_text.config(state=tk.DISABLED)
+
+    search_btn = tk.Button(new_win, text='Найти товар', bg='#fdd28e', font=('Myriad Pro', 10, 'bold'),
+                           command=search_product, width=15, height=2)
+    search_btn.pack()
+    search_btn.place(relx=0.5, rely=0.30, anchor=tk.CENTER)
+
+    new_win.bind_all('<Return>', search_product)
+
+    def close_new_window():
+        new_win.destroy()
+        win.deiconify()
+
+    close_btn = tk.Button(new_win, text='Закрыть', bg='#fdd28e', font=('Myriad Pro', 15, 'bold'),
+                          command=close_new_window, width=15, height=2)
+    close_btn.pack()
+    close_btn.place(relx=0.5, rely=0.9, anchor=tk.CENTER)
+
+    win.bind('<Return>', lambda event: search_product())
+
+    photo = tk.PhotoImage(file='ProSrokPic.png')
+    new_win.iconphoto(False, photo)
+
+    new_win.focus_force()
+    name_cod.focus_set()
+
+
+def select_database():
+    selection = listbox.curselection()
+    if selection:
+        index = selection[0]
+        database_name = listbox.get(index)
+        save_database_selection(database_name)
+        on_database_select(database_name)
+
+
+# Function to save the selected database to a file
+def save_database_selection(database_name):
+    with open("selected_database.txt", "w") as file:
+        file.write(database_name)
+
+
+# Function to check if the database selection file exists
+def check_database_selection_file():
+    return os.path.exists("selected_database.txt")
+
+
+# Function to read the selected database from the file
+def read_database_selection():
+    with open("selected_database.txt", "r") as file:
+        return file.read().strip()
+
+
+# Check if the database selection file exists
+if check_database_selection_file():
+    selected_database = read_database_selection()
+    on_database_select(selected_database)
+else:
+    db_select_win = tk.Tk()
+    db_select_win.title("Выбор базы данных")
+    photo = tk.PhotoImage(file='ProSrokPic.png')
+    db_select_win.config(bg='#ffe0af')
+    db_select_win.iconphoto(False, photo)
+    db_select_win.geometry('500x600+400+10')
+    db_select_win.resizable(False, False)
+
+    # Список доступных баз данных
+    databases = ["tivat",  "3801", "3802", "3804", "3805", "3806", "3807",
+                 "3808", "3809", "3810", "38101", "38102", "38103", "35901"]
+
+    # Создайте виджет списка для отображения баз данных
+    listbox = tk.Listbox(db_select_win, width=15, height=15, font=('Myriad Pro', 15), selectmode=tk.SINGLE)
+    for database in databases:
+        listbox.insert(tk.END, database)
+    listbox.pack(padx=10, pady=10)
+
+    # Добавьте кнопку "Выбрать"
+    select_button = tk.Button(db_select_win, text="Выбрать",bg='#fdd28e',
+                      font=('Myriad Pro', 20, 'bold'),  command=select_database)
+    select_button.pack(pady=10)
+
+    # Запуск цикла обработки событий для окна выбора базы данных
+    db_select_win.mainloop()
+
+
+win = tk.Tk()
+win.title('ПроСрок')
+photo = tk.PhotoImage(file='ProSrokPic.png')
+win.config(bg='#ffe0af')
+win.iconphoto(False, photo)
+win.geometry('900x700+500+10')
+win.resizable(False, False)
+btn_1 = tk.Button(win, text='Ввести информацию о датах',
+                  bg='#fdd28e',
+                  font=('Myriad Pro', 30, 'bold'), command=enter_data)
+btn_2 = tk.Button(win, text='Информация о подходящих сроках',
+                  bg='#fdd28e',
+                  font=('Myriad Pro', 30, 'bold'), command=show_info_window)
+btn_3 = tk.Button(win, text='Поиск товара',
+                  bg='#fdd28e',
+                  font=('Myriad Pro', 20, 'bold'), command=product_search)
+btn_1.place(relx=0.5, rely=0.25, anchor=tk.CENTER)
+btn_2.place(relx=0.5, rely=0.55, anchor=tk.CENTER)
+btn_3.place(relx=0.5, rely=0.8, anchor=tk.CENTER)
+
+win.mainloop()
